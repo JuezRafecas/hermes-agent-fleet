@@ -1,0 +1,34 @@
+#!/command/with-contenv bash
+set -euo pipefail
+# Ten isolated X displays for the computer_use toolset. A single s6 longrun
+# owns the pool and exits if any child Xvfb dies, so s6 restarts the whole pool
+# into a known state instead of leaving a profile on a dead display.
+geometry="${HERMES_XVFB_GEOMETRY:-1920x1080x24}"
+declare -a xvfb_pids=()
+
+mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
+
+cleanup() {
+  trap - EXIT TERM INT
+  if ((${#xvfb_pids[@]})); then
+    kill "${xvfb_pids[@]}" 2>/dev/null || true
+    wait "${xvfb_pids[@]}" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+trap 'exit 0' TERM INT
+
+for display_number in {100..109}; do
+  display=":$display_number"
+  # A stale lock/socket from a hard kill keeps that member from coming back.
+  rm -f "/tmp/.X${display_number}-lock" "/tmp/.X11-unix/X${display_number}"
+  # -ac lets the unprivileged hermes user connect; TCP remains disabled.
+  Xvfb "$display" -screen 0 "$geometry" -nolisten tcp -ac &
+  xvfb_pids+=("$!")
+done
+
+# The pool is one health unit. Any unexpected member exit restarts all ten.
+set +e
+wait -n "${xvfb_pids[@]}"
+set -e
+exit 1

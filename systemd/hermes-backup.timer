@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily backup of /srv/hermes/data
+
+[Timer]
+OnCalendar=*-*-* 04:17:00
+RandomizedDelaySec=900
+Persistent=true
+
+[Install]
+WantedBy=timers.target

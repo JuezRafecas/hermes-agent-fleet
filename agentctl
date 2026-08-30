@@ -1,0 +1,549 @@
+#!/usr/bin/env bash
+# agentctl — the single administration entrypoint for hermes-agent-fleet.
+set -euo pipefail
+
+HERMES_ROOT="${HERMES_ROOT:-/srv/hermes}"
+# install persists the selected port; an explicit environment value wins.
+[ -f "$HERMES_ROOT/.agentctl.env" ] && . "$HERMES_ROOT/.agentctl.env"
+HERMES_CONTAINER="${HERMES_CONTAINER:-hermes}"
+HERMES_PORT="${HERMES_PORT:-${AGENTCTL_PORT:-9119}}"
+HERMES_UID="${HERMES_UID:-10001}"
+HERMES_GID="${HERMES_GID:-10001}"
+SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DATA="$HERMES_ROOT/data"
+HCLI=/opt/hermes/bin/hermes
+LOCK="$HERMES_ROOT/.agentctl.lock"
+DISPLAY_MAP_TOOL="$SRC/scripts/profile-displays.py"
+
+die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+info() { printf '\033[36m>>\033[0m %s\n' "$*"; }
+ok()   { printf '\033[32mok:\033[0m %s\n' "$*"; }
+
+compose() {
+  ( cd "$HERMES_ROOT" \
+    && HERMES_CONTAINER="$HERMES_CONTAINER" HERMES_PORT="$HERMES_PORT" \
+       HERMES_UID="$HERMES_UID" HERMES_GID="$HERMES_GID" \
+       docker compose "$@" )
+}
+hx()      { docker exec "$HERMES_CONTAINER" "$HCLI" "$@"; }
+hx_tty()  { docker exec -it "$HERMES_CONTAINER" "$HCLI" "$@"; }
+running() { [ "$(docker inspect -f '{{.State.Running}}' "$HERMES_CONTAINER" 2>/dev/null)" = true ]; }
+need_up() { running || die "container '$HERMES_CONTAINER' is not running (agentctl up)"; }
+need_root() { [ "$(id -u)" = 0 ] || die "${1:-this command} requires root"; }
+
+sync_displays() {
+  "$DISPLAY_MAP_TOOL" ensure "$DATA"
+  chmod 644 "$DATA/.displays.json"
+  chown "$HERMES_UID:$HERMES_GID" "$DATA/.displays.json" 2>/dev/null || true
+}
+
+check_display_capacity() {
+  "$DISPLAY_MAP_TOOL" check "$DATA" "$1"
+}
+
+# Serialize profile-tree mutations.
+with_lock() {
+  mkdir -p "$HERMES_ROOT"
+  command -v flock >/dev/null 2>&1 || return 0
+  exec 9>"$LOCK"; flock -w 120 9 || die "another agentctl process holds the lock"
+}
+
+api() { # api <method> <path> [body]
+  local m="$1" p="$2" body="${3:-}" jar="$HERMES_ROOT/.dash-cookies"
+  [ -s "$jar" ] || dash_login
+  local args=(-fsS -b "$jar" -X "$m" "http://127.0.0.1:$HERMES_PORT$p")
+  [ -n "$body" ] && args+=(-H 'Content-Type: application/json' -d "$body")
+  # Re-login once when a container recreation invalidates the cookie.
+  curl "${args[@]}" 2>/dev/null || { dash_login; curl "${args[@]}"; }
+}
+
+dash_login() {
+  local jar="$HERMES_ROOT/.dash-cookies" u p
+  u=$(grep -m1 '^HERMES_DASHBOARD_BASIC_AUTH_USERNAME=' "$DATA/.env" | cut -d= -f2-) || true
+  p=$(grep -m1 '^HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=' "$DATA/.env" | cut -d= -f2-) || true
+  [ -n "${u:-}" ] && [ -n "${p:-}" ] || die "missing HERMES_DASHBOARD_BASIC_AUTH_USERNAME/_PASSWORD in data/.env"
+  umask 077
+  curl -fsS -c "$jar" -X POST "http://127.0.0.1:$HERMES_PORT/auth/password-login" \
+    -H 'Content-Type: application/json' \
+    --data-binary @<(printf '{"provider":"basic","username":%s,"password":%s}' \
+        "$(printf '%s' "$u" | jq -Rs .)" "$(printf '%s' "$p" | jq -Rs .)") >/dev/null \
+    || die "dashboard login failed"
+}
+
+# --- small agent.yaml reader -------------------------------------------------
+ay() { python3 -c 'import sys,yaml,json; d=yaml.safe_load(open(sys.argv[1])) or {}
+v=d
+for k in sys.argv[2].split("."):
+    v = (v or {}).get(k)
+print("" if v is None else (v if isinstance(v,str) else json.dumps(v)))' "$1" "$2"; }
+
+# ============================================================================
+cmd_install() {
+  with_lock
+  command -v docker >/dev/null || die "docker is required"
+  info "installing into $HERMES_ROOT"
+  mkdir -p "$HERMES_ROOT" "$DATA" "$HERMES_ROOT/backups"
+  printf 'AGENTCTL_PORT=%s\n' "$HERMES_PORT" > "$HERMES_ROOT/.agentctl.env"
+  # Copy reviewed source, never runtime data.
+  if [ "$SRC" != "$HERMES_ROOT" ]; then
+    for f in Dockerfile docker-compose.yml agentctl README.md LICENSE .env.example; do cp -f "$SRC/$f" "$HERMES_ROOT/$f"; done
+    for d in s6 config agents systemd mac test scripts; do
+      rm -rf "$HERMES_ROOT/$d"; cp -R "$SRC/$d" "$HERMES_ROOT/$d"
+    done
+  fi
+  chmod +x "$HERMES_ROOT/agentctl" "$HERMES_ROOT/test/smoke.sh" "$HERMES_ROOT/mac/install-tunnel.sh" "$HERMES_ROOT"/scripts/*.sh 2>/dev/null || true
+
+  if [ ! -f "$DATA/.env" ]; then
+    local pw; pw=$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 32)
+    umask 077
+    cat > "$DATA/.env" <<EOF
+# Secrets shared by every profile. Profile-only secrets belong below profiles/.
+HERMES_DASHBOARD_BASIC_AUTH_USERNAME=admin
+HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=$pw
+# Stable dashboard session-signing key.
+HERMES_DASHBOARD_BASIC_AUTH_SECRET=$(head -c 48 /dev/urandom | base64 | tr -d '/+=' | head -c 48)
+HERMES_UID=$HERMES_UID
+HERMES_GID=$HERMES_GID
+# Anthropic subscription token from \`claude setup-token\`:
+# CLAUDE_CODE_OAUTH_TOKEN=
+# OPENROUTER_API_KEY=
+EOF
+    info "generated data/.env; read it locally for the admin dashboard password"
+  fi
+  [ -f "$DATA/config.yaml" ]  || cp "$SRC/config/config.yaml" "$DATA/config.yaml"
+  [ -f "$DATA/SOUL.md" ]      || cp "$SRC/config/SOUL.default.md" "$DATA/SOUL.md"
+  sync_displays
+  chmod 600 "$DATA/.env" "$DATA/config.yaml"
+  chown -R "$HERMES_UID:$HERMES_GID" "$DATA" 2>/dev/null \
+    || info "could not chown data; correct ownership if the container cannot start"
+
+  info "building image"; compose build
+  if [ "$(id -u)" = 0 ] && [ -d /run/systemd/system ]; then
+    cmd_units_install
+  else
+    info "systemd or root unavailable; install units manually (see README)"
+  fi
+  find "$DATA/profiles" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort > "$HERMES_ROOT/.profiles-snapshot" || true
+  compose up -d
+  ok "installed; dashboard: http://127.0.0.1:$HERMES_PORT"
+}
+
+cmd_up()      { compose up -d; }
+cmd_down()    { compose down; }
+cmd_restart() { compose restart; }
+cmd_status() {
+  compose ps
+  running && { echo; curl -fsS "http://127.0.0.1:$HERMES_PORT/api/health" && echo; } || true
+}
+cmd_logs() { if [ "${1:-}" = "-f" ]; then compose logs -f --tail 200 hermes; else compose logs --tail 200 hermes; fi; }
+cmd_reload() {
+  need_up
+  sync_displays
+  find "$DATA/profiles" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort > "$HERMES_ROOT/.profiles-snapshot" 2>/dev/null || true
+  local log="$DATA/logs/gateway.log" before=0
+  [ -f "$log" ] && before=$(grep -c 'Cron scheduler will tick' "$log" || true)
+  hx gateway restart
+  # The command returns before the gateway has reloaded the profile set.
+  local i; for i in $(seq 1 60); do
+    if [ -f "$log" ] && [ "$(grep -c 'Cron scheduler will tick' "$log" || true)" -gt "$before" ]; then
+      ok "gateway restarted — $(grep 'Cron scheduler will tick' "$log" | tail -1 | sed 's/.*tick //')"; return 0
+    fi; sleep 1
+  done
+  info "gateway restarted; scheduler confirmation was not visible within 60s"
+}
+
+cmd_ls() {
+  need_up
+  local served; served=$(api GET /api/profiles 2>/dev/null || echo '[]')
+  printf '%-28s %-10s %s\n' PROFILE SERVED DESCRIPTION
+  for d in "$DATA"/profiles/*/; do
+    [ -d "$d" ] || continue
+    local n; n=$(basename "$d")
+    local s; s=$(printf '%s' "$served" | jq -r --arg n "$n" \
+      '[(if type=="array" then .[] else (.profiles//[])[] end)]|map(if type=="string" then . else (.name//.id//"") end)|index($n)|if .==null then "no" else "yes" end' 2>/dev/null || echo '?')
+    printf '%-28s %-10s %s\n' "$n" "$s" "$(head -c 80 "$d/description" 2>/dev/null || true)"
+  done
+}
+
+cmd_displays() {
+  with_lock
+  sync_displays
+  "$DISPLAY_MAP_TOOL" list "$DATA"
+}
+
+cmd_add() {
+  local name="${1:-}"; shift || true
+  [ -n "$name" ] || die "usage: agentctl add <name> [--desc X] [--model p/m] [--soul f] [--seed agents/dir]"
+  local desc="" model="" soul="" seed=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --desc)  desc="$2";  shift 2 ;;
+      --model) model="$2"; shift 2 ;;
+      --soul)  soul="$2";  shift 2 ;;
+      --seed)  seed="$2";  shift 2 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+  with_lock; need_up
+  [ -d "$DATA/profiles/$name" ] && die "profile '$name' already exists"
+  check_display_capacity "$name"
+
+  # A seed supplies description, model, SOUL, env names, skills, and MCPs.
+  local ayml=""
+  if [ -n "$seed" ]; then
+    [ -d "$seed" ] || seed="$SRC/$seed"
+    [ -f "$seed/agent.yaml" ] || die "seed has no agent.yaml: $seed"
+    ayml="$seed/agent.yaml"
+    [ -n "$desc" ]  || desc=$(ay "$ayml" description)
+    [ -n "$soul" ]  || soul="$seed/SOUL.md"
+    if [ -z "$model" ]; then
+      local mp md; mp=$(ay "$ayml" model.provider); md=$(ay "$ayml" model.default)
+      [ -n "$mp" ] && model="$mp/$md"
+    fi
+  fi
+
+  info "creating profile '$name'"
+  hx profile create "$name" --clone ${desc:+--description "$desc"}
+
+  local pdir="$DATA/profiles/$name"
+  [ -d "$pdir" ] || die "profile was not created at $pdir"
+  [ -n "$soul" ] && [ -f "$soul" ] && { cp "$soul" "$pdir/SOUL.md"; ok "wrote SOUL.md"; }
+
+  # Write variable names only. Secret values arrive through set-secret.
+  if [ -n "$ayml" ]; then
+    umask 077; : > "$pdir/.env.new"
+    { echo "# Load values with: agentctl set-secret <KEY> --profile $name"
+      ay "$ayml" env | jq -r '.[]? // empty' | sed 's/$/=/'; } > "$pdir/.env.new"
+    if [ -f "$pdir/.env" ]; then
+      while IFS= read -r line; do
+        local k="${line%%=*}"
+        case "$k" in \#*|"") continue ;; esac
+        grep -q "^$k=" "$pdir/.env" || echo "$line" >> "$pdir/.env"
+      done < "$pdir/.env.new"
+      rm -f "$pdir/.env.new"
+    else
+      mv "$pdir/.env.new" "$pdir/.env"
+    fi
+    chmod 600 "$pdir/.env"
+    # Deep-merge seed MCP and configuration blocks.
+    python3 - "$ayml" "$pdir/config.yaml" <<'PY'
+import sys, yaml
+seed = yaml.safe_load(open(sys.argv[1])) or {}
+try:    cfg = yaml.safe_load(open(sys.argv[2])) or {}
+except FileNotFoundError: cfg = {}
+def merge(a, b):
+    for k, v in (b or {}).items():
+        if isinstance(v, dict) and isinstance(a.get(k), dict): merge(a[k], v)
+        else: a[k] = v
+    return a
+if seed.get("mcp_servers"):
+    merge(cfg.setdefault("mcp_servers", {}), seed["mcp_servers"]); print("applied mcp_servers:", ", ".join(seed["mcp_servers"]))
+if seed.get("config"):
+    merge(cfg, seed["config"]); print("applied config:", ", ".join(seed["config"]))
+yaml.safe_dump(cfg, open(sys.argv[2], "w"), sort_keys=False, allow_unicode=True)
+PY
+    if [ -d "$seed/skills" ]; then mkdir -p "$pdir/skills"; cp -R "$seed/skills/." "$pdir/skills/"; ok "installed skills: $(ls "$seed/skills" | tr '\n' ' ')"; fi
+  fi
+
+  [ -n "$model" ] && cmd_model "$name" "$model"
+  chown -R "$HERMES_UID:$HERMES_GID" "$pdir" 2>/dev/null || true
+  # Run an optional seed setup as the unprivileged Hermes user.
+  if [ -n "$seed" ] && [ -f "$seed/setup.sh" ]; then
+    mkdir -p "$pdir/workspace"; cp "$seed/setup.sh" "$pdir/workspace/setup.sh"; chown -R "$HERMES_UID:$HERMES_GID" "$pdir/workspace"
+    info "running seed setup.sh in the container"
+    docker exec --user "$HERMES_UID" -e HOME=/opt/data "$HERMES_CONTAINER" bash "/opt/data/profiles/$name/workspace/setup.sh" || info "setup.sh failed; review it and run: agentctl setup $name"
+  fi
+  cmd_gh_sync >/dev/null 2>&1 || true
+  cmd_reload
+  ok "profile '$name' is ready; load secrets with agentctl set-secret <KEY> --profile $name"
+}
+
+cmd_rm() {
+  local name="${1:?usage: agentctl rm <name>}"
+  with_lock
+  [ -d "$DATA/profiles/$name" ] || die "profile '$name' does not exist"
+  mkdir -p "$HERMES_ROOT/backups"
+  local tar="$HERMES_ROOT/backups/profile-$name-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
+  tar -czf "$tar" -C "$DATA/profiles" "$name"
+  ok "backup: $tar"
+  if running; then hx profile delete "$name" -y 2>/dev/null || rm -rf "$DATA/profiles/$name"
+  else rm -rf "$DATA/profiles/$name"; fi
+  "$DISPLAY_MAP_TOOL" release "$DATA" "$name"
+  chown "$HERMES_UID:$HERMES_GID" "$DATA/.displays.json" 2>/dev/null || true
+  running && cmd_reload || true
+  ok "deleted profile '$name'"
+}
+
+cmd_model() {
+  local name="${1:?usage: agentctl model <name> <provider/model>}" spec="${2:?}"
+  need_up
+  local prov="${spec%%/*}" mdl="${spec#*/}"
+  [ "$prov" != "$spec" ] || die "format: provider/model (example: openai-codex/gpt-5.6-sol)"
+  hx -p "$name" config set model.provider "$prov"
+  hx -p "$name" config set model.default  "$mdl"
+  ok "$name -> $prov / $mdl"
+}
+
+cmd_login_codex() { need_up; hx_tty auth add openai-codex; ok "updated shared auth.json"; }
+
+cmd_set_secret() {
+  local key="${1:?usage: agentctl set-secret <KEY> [--profile name] (value through stdin)}"; shift || true
+  local prof=""
+  [ "${1:-}" = "--profile" ] && { prof="$2"; shift 2; }
+  local target="$DATA/.env"
+  [ -n "$prof" ] && target="$DATA/profiles/$prof/.env"
+  [ -d "$(dirname "$target")" ] || die "profile '$prof' does not exist"
+  local val; IFS= read -r val || true
+  [ -n "$val" ] || die "no value received on stdin"
+  umask 077; touch "$target"
+  if grep -q "^$key=" "$target"; then
+    python3 -c 'import sys,os
+p,k,v=sys.argv[1:4]
+ls=[l for l in open(p).read().splitlines()]
+open(p,"w").write("\n".join((k+"="+v) if l.startswith(k+"=") else l for l in ls)+"\n")' "$target" "$key" "$val"
+  else printf '%s=%s\n' "$key" "$val" >> "$target"; fi
+  chmod 600 "$target"; chown "$HERMES_UID:$HERMES_GID" "$target" 2>/dev/null || true
+  ok "wrote $key for ${prof:-<platform>} without printing its value"
+}
+
+cmd_backup() {
+  mkdir -p "$HERMES_ROOT/backups"
+  local out="$HERMES_ROOT/backups/hermes-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
+  tar -czf "$out" -C "$HERMES_ROOT" \
+      --exclude='data/cache' --exclude='data/*/cache' --exclude='data/bootstrap-cache' \
+      --exclude='data/audio_cache' --exclude='data/.cua-driver' --exclude='data/**/node_modules' \
+      data
+  ok "$out ($(du -h "$out" | cut -f1))"
+  ls -1t "$HERMES_ROOT"/backups/hermes-*.tar.gz 2>/dev/null | tail -n +15 | xargs -r rm -f
+}
+
+cmd_restore() {
+  local f="${1:?usage: agentctl restore <backup.tar.gz>}"
+  [ -f "$f" ] || die "file does not exist: $f"
+  with_lock
+  running && compose down
+  mv "$DATA" "$DATA.pre-restore-$(date -u +%Y%m%dT%H%M%SZ)"
+  tar -xzf "$f" -C "$HERMES_ROOT"
+  chown -R "$HERMES_UID:$HERMES_GID" "$DATA" 2>/dev/null || true
+  compose up -d
+  ok "restored from $f"
+}
+
+env_value() {
+  local key="$1" file="$2" line=""
+  [ -f "$file" ] || die "file does not exist: $file"
+  line=$(grep -m1 "^${key}=" "$file" 2>/dev/null || true)
+  [ -n "$line" ] || die "missing $key in $file"
+  printf '%s' "${line#*=}"
+}
+
+load_restic_s3_env() {
+  need_root "S3 backup/restore"
+  command -v restic >/dev/null 2>&1 || die "restic is required on the host"
+  local endpoint bucket access_key secret_key region restic_password
+  endpoint=$(env_value BACKUP_S3_ENDPOINT "$DATA/.env")
+  bucket=$(env_value BACKUP_S3_BUCKET "$DATA/.env")
+  access_key=$(env_value BACKUP_S3_ACCESS_KEY_ID "$DATA/.env")
+  secret_key=$(env_value BACKUP_S3_SECRET_ACCESS_KEY "$DATA/.env")
+  region=$(env_value BACKUP_S3_REGION "$DATA/.env")
+  restic_password=$(env_value RESTIC_PASSWORD "$DATA/.env")
+  case "$endpoint" in https://*|http://*) ;; *) die "BACKUP_S3_ENDPOINT must be an HTTP(S) URL" ;; esac
+  [ -n "$bucket" ] && [[ "$bucket" != */* ]] || die "BACKUP_S3_BUCKET must be a bucket name"
+  [ -n "$access_key" ] || die "BACKUP_S3_ACCESS_KEY_ID must not be empty"
+  [ -n "$secret_key" ] || die "BACKUP_S3_SECRET_ACCESS_KEY must not be empty"
+  [ "${#restic_password}" -ge 32 ] || die "RESTIC_PASSWORD must contain at least 32 characters"
+  export AWS_ACCESS_KEY_ID="$access_key"
+  export AWS_SECRET_ACCESS_KEY="$secret_key"
+  export AWS_DEFAULT_REGION="$region"
+  export RESTIC_PASSWORD="$restic_password"
+  export RESTIC_REPOSITORY="s3:${endpoint%/}/$bucket"
+}
+
+cmd_backup_s3() {
+  with_lock
+  load_restic_s3_env
+  if ! restic snapshots --json >/dev/null 2>&1; then
+    info "initializing Restic repository"
+    restic init
+  fi
+  restic backup "$DATA" \
+    --exclude "$DATA/cache" \
+    --exclude "$DATA/*/cache" \
+    --exclude "$DATA/bootstrap-cache" \
+    --exclude "$DATA/.cache" \
+    --exclude 'node_modules' \
+    --exclude 'workspace/*/node_modules'
+  restic forget --keep-daily 14 --keep-weekly 8 --prune
+  ok "S3 backup completed"
+}
+
+cmd_snapshots_s3() {
+  with_lock
+  load_restic_s3_env
+  restic snapshots "$@"
+}
+
+cmd_restore_s3() {
+  local snapshot="${1:?usage: agentctl restore-s3 <snapshot|latest> <absolute-destination>}"
+  local destination="${2:?usage: agentctl restore-s3 <snapshot|latest> <absolute-destination>}"
+  case "$destination" in /*) ;; *) die "restore destination must be absolute" ;; esac
+  [ ! -e "$destination" ] || die "destination already exists: $destination"
+  with_lock
+  load_restic_s3_env
+  restic restore "$snapshot" --target "$destination"
+  ok "restored snapshot $snapshot into $destination without replacing active data"
+}
+
+cmd_units_install() {
+  need_root "units-install"
+  [ -d /run/systemd/system ] || die "systemd is unavailable"
+  install -m 0644 "$SRC/systemd/"*.path "$SRC/systemd/"*.service "$SRC/systemd/"*.timer /etc/systemd/system/
+  systemctl daemon-reload
+  systemctl enable --now hermes-profiles.path hermes-backup.timer
+  ok "installed and enabled systemd units"
+}
+
+cmd_setup() { local n="${1:?usage: agentctl setup <name>}"; need_up; docker exec --user "$HERMES_UID" -e HOME=/opt/data "$HERMES_CONTAINER" bash "/opt/data/profiles/$n/workspace/setup.sh"; }
+
+cmd_port() {
+  local p="${1:?usage: agentctl port <port>}"
+  printf 'AGENTCTL_PORT=%s\n' "$p" > "$HERMES_ROOT/.agentctl.env"; HERMES_PORT="$p"
+  compose down >/dev/null 2>&1 || true; compose up -d; ok "dashboard now uses 127.0.0.1:$p"
+}
+
+# Archive and remove an explicitly selected legacy source tree.
+cmd_purge_v1() {
+  need_root "purge-v1"
+  with_lock; mkdir -p "$HERMES_ROOT/backups"
+  local legacy_root="${LEGACY_PLATFORM_ROOT:-}" parent name archive
+  [ "${CONFIRM_PURGE_V1:-}" = YES ] || die "set CONFIRM_PURGE_V1=YES after reviewing the target"
+  case "$legacy_root" in /srv/*) ;; *) die "LEGACY_PLATFORM_ROOT must be an explicit child of /srv" ;; esac
+  [ -d "$legacy_root" ] && [ ! -L "$legacy_root" ] || die "legacy root must be a real directory"
+  [ "$legacy_root" != "$HERMES_ROOT" ] || die "legacy root cannot equal HERMES_ROOT"
+  parent=$(dirname "$legacy_root"); name=$(basename "$legacy_root")
+  archive="$HERMES_ROOT/backups/${name}-v1-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
+  tar -czf "$archive" -C "$parent" "$name"
+  rm -rf -- "$legacy_root"
+  ok "archived legacy tree at $archive and removed the reviewed source path"
+}
+
+# Install shared skills into default and every profile.
+cmd_skills_sync() {
+  local src="$HERMES_ROOT/config/skills-shared"; [ -d "$src" ] || die "missing $src"
+  for dest in "$DATA/skills" "$DATA"/profiles/*/skills; do
+    mkdir -p "$dest"
+    for sk in "$src"/*/; do n=$(basename "$sk"); rm -rf "$dest/$n"; cp -RL "$sk" "$dest/$n"; done
+  done
+  chown -R "$HERMES_UID:$HERMES_GID" "$DATA/skills" "$DATA"/profiles/*/skills 2>/dev/null || true
+  ok "synchronized shared skills: $(ls "$src" | tr '\n' ' ')"
+}
+
+# Optionally route VPS egress through a named Tailscale exit node.
+cmd_exit_node() {
+  case "${1:-}" in
+    on)  local n="${2:?usage: agentctl exit-node on <tailscale-node>}"; tailscale set --exit-node="$n" --exit-node-allow-lan-access=false && ok "exit node enabled: $n";;
+    off) tailscale set --exit-node= && ok "exit node disabled";;
+    *)   tailscale status | head -5; echo; echo "usage: agentctl exit-node on <node>|off";;
+  esac
+}
+
+# Replicate file-backed gh auth into each profile's scrubbed terminal HOME.
+cmd_gh_sync() {
+  need_up
+  docker exec --user "$HERMES_UID" "$HERMES_CONTAINER" sh -c '
+    src=/opt/data/.config/gh/hosts.yml
+    if [ ! -s "$src" ]; then t="$GH_TOKEN"; mkdir -p /opt/data/.config/gh; printf "%s" "$t" | env -u GH_TOKEN HOME=/opt/data gh auth login --with-token --hostname github.com >/dev/null 2>&1; fi
+    for p in /opt/data/profiles/*/; do mkdir -p "$p/home/.config/gh"; cp "$src" "$p/home/.config/gh/hosts.yml"; chmod 600 "$p/home/.config/gh/hosts.yml"; done
+    echo synced' && ok "synchronized file-backed gh auth across profiles"
+}
+
+cmd_shell() { need_up; if [ -n "${1:-}" ]; then hx_tty -p "$1" chat; else hx_tty chat; fi; }
+
+# Import matching profile auth/env files from an explicit legacy Hermes data root.
+cmd_import_legacy() {
+  need_root "import-legacy"
+  local legacy_data="${LEGACY_HERMES_DATA:-}" profile name source
+  case "$legacy_data" in /*) ;; *) die "LEGACY_HERMES_DATA must be an absolute path" ;; esac
+  [ -d "$legacy_data" ] && [ ! -L "$legacy_data" ] || die "legacy data root must be a real directory"
+  with_lock
+  if [ -f "$legacy_data/auth.json" ] && [ ! -f "$DATA/auth.json" ]; then
+    install -m 600 -o "$HERMES_UID" -g "$HERMES_GID" "$legacy_data/auth.json" "$DATA/auth.json"
+    ok "imported shared auth.json"
+  else info "auth.json already exists or is absent from the legacy root"; fi
+  for profile in "$DATA"/profiles/*/; do
+    [ -d "$profile" ] || continue
+    name=$(basename "$profile"); source="$legacy_data/profiles/$name/.env"
+    [ -f "$source" ] || { info "$name: no matching legacy .env"; continue; }
+    install -m 600 -o "$HERMES_UID" -g "$HERMES_GID" "$source" "$profile/.env"
+    ok "$name: imported matching .env without printing values"
+  done
+  running && cmd_reload || true
+}
+
+usage() { cat <<EOF
+agentctl — hermes-agent-fleet administration   (HERMES_ROOT=$HERMES_ROOT)
+
+  install                      install/build/start and configure systemd
+  up | down | restart          container lifecycle
+  status                       compose status plus /api/health
+  logs [-f]                    gateway logs
+  reload                       restart gateway and serve the current profiles
+
+  ls                           profiles and gateway serving state
+  displays                     profile-to-X-display assignments
+  add <name> [--desc X] [--model prov/model] [--soul f] [--seed agents/dir]
+  rm <name>                    delete a profile after making a local archive
+  model <name> <prov/model>    change a profile model
+  shell [name]                 Hermes chat inside the container
+  setup <name>                 rerun a seed setup.sh
+  skills-sync                  install shared skills into all profiles
+  gh-sync                      copy file-backed gh auth into profile homes
+  exit-node on <node>|off      route VPS egress through a Tailscale exit node
+  port <port>                  move dashboard to another loopback port
+  purge-v1                     archive/delete explicit LEGACY_PLATFORM_ROOT
+
+  login-codex                  interactive shared Codex login
+  set-secret <KEY> [--profile name]   read a value from stdin, never argv
+
+  backup                       local tar.gz, retaining the newest 14
+  restore <file>               restore a local archive
+  backup-s3                    encrypted off-host Restic backup to any S3
+  snapshots-s3 [options]       list encrypted S3 snapshots
+  restore-s3 <snap> <dest>     restore into a new absolute destination
+  units-install                install and enable systemd units
+  import-legacy                import matching auth/env from LEGACY_HERMES_DATA
+EOF
+}
+
+case "${1:-}" in
+  install) shift; cmd_install "$@" ;;
+  up) shift; cmd_up "$@" ;;
+  down) shift; cmd_down "$@" ;;
+  restart) shift; cmd_restart "$@" ;;
+  status) shift; cmd_status "$@" ;;
+  logs) shift; cmd_logs "$@" ;;
+  reload) shift; cmd_reload "$@" ;;
+  ls) shift; cmd_ls "$@" ;;
+  displays) shift; cmd_displays "$@" ;;
+  add) shift; cmd_add "$@" ;;
+  rm) shift; cmd_rm "$@" ;;
+  model) shift; cmd_model "$@" ;;
+  shell) shift; cmd_shell "$@" ;;
+  setup) shift; cmd_setup "$@" ;;
+  skills-sync) shift; cmd_skills_sync "$@" ;;
+  gh-sync) shift; cmd_gh_sync "$@" ;;
+  exit-node) shift; cmd_exit_node "$@" ;;
+  port) shift; cmd_port "$@" ;;
+  purge-v1) shift; cmd_purge_v1 "$@" ;;
+  login-codex) shift; cmd_login_codex "$@" ;;
+  set-secret) shift; cmd_set_secret "$@" ;;
+  backup) shift; cmd_backup "$@" ;;
+  restore) shift; cmd_restore "$@" ;;
+  backup-s3) shift; cmd_backup_s3 "$@" ;;
+  snapshots-s3) shift; cmd_snapshots_s3 "$@" ;;
+  restore-s3) shift; cmd_restore_s3 "$@" ;;
+  units-install) shift; cmd_units_install "$@" ;;
+  import-legacy) shift; cmd_import_legacy "$@" ;;
+  ""|-h|--help|help) usage ;;
+  *) die "unknown command: $1 (agentctl --help)" ;;
+esac

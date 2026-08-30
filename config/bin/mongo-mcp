@@ -1,0 +1,8 @@
+#!/bin/sh
+# mongo-mcp <profile> [--read-only] — MongoDB MCP using that profile's MONGO_URI.
+p="${1:-default}"; f="/opt/data/profiles/$p/.env"; [ "$p" = default ] && f=/opt/data/.env
+u=$(grep -m1 '^MONGO_URI=' "$f" 2>/dev/null | cut -d= -f2-)
+[ -n "$u" ] || { echo "mongo-mcp: MONGO_URI is missing from $f" >&2; exit 1; }
+export MDB_MCP_CONNECTION_STRING="$u"; export MDB_MCP_READ_ONLY="false"
+[ "${2:-}" = "--read-only" ] && export MDB_MCP_READ_ONLY="true"
+exec mongodb-mcp-server

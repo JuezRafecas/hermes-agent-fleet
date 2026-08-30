@@ -1,0 +1,12 @@
+[Unit]
+Description=Watch data/profiles and serve new profiles through the gateway
+Documentation=file:///srv/hermes/README.md
+
+[Path]
+# The gateway resolves the profile set only at startup. This watcher restarts
+# it when a profile is added or removed.
+PathChanged=/srv/hermes/data/profiles
+Unit=hermes-profiles.service
+
+[Install]
+WantedBy=multi-user.target

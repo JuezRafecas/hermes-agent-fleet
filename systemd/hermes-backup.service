@@ -1,0 +1,13 @@
+[Unit]
+Description=Hermes local and off-host S3 backup
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+Environment=HERMES_ROOT=/srv/hermes
+ExecStart=/srv/hermes/agentctl backup
+ExecStart=/srv/hermes/agentctl backup-s3
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=6h

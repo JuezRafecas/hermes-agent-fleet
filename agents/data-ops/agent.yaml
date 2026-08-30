@@ -1,0 +1,22 @@
+name: data-ops
+description: >-
+  Investigates operational data with profile-aware Postgres and MongoDB MCP
+  wrappers plus the psql and mongosh command-line clients.
+tenant: example
+
+model:
+  provider: openai-codex
+  default: gpt-5.6-sol
+
+env:
+  - NEON_API_KEY
+  - MONGO_URI
+  - POSTGRES_URL
+
+mcp_servers:
+  postgres:
+    command: neon-mcp
+    args: ["data-ops"]
+  mongo:
+    command: mongo-mcp
+    args: ["data-ops", "--read-only"]

@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+display=$(
+  /usr/local/libexec/profile-displays.py current /opt/data/.displays.json
+) || {
+  echo "cua-driver: no isolated display is available for the active Hermes profile" >&2
+  exit 78
+}
+export DISPLAY="$display"
+exec /usr/local/libexec/cua-driver "$@"

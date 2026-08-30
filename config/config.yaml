@@ -1,0 +1,74 @@
+# platform-v2 — config del perfil `default` (raíz de HERMES_HOME=/opt/data).
+# Es el config compartido de la plataforma. Cada perfil tiene el suyo en
+# data/profiles/<name>/config.yaml y pisa lo que necesite (model, mcp_servers).
+#
+# _config_version fija la versión de esquema para que Hermes NO loguee el
+# warning de migración al arrancar. Si actualizás la imagen, mirá
+# `latest_config_version` en GET /api/status y subí este número.
+_config_version: 39
+
+gateway:
+  # Un solo proceso gateway sirve TODOS los perfiles de data/profiles/.
+  # OJO: el set de perfiles se resuelve SOLO al arrancar el gateway. Después de
+  # crear un perfil hace falta `agentctl reload` (el watcher systemd del host
+  # lo hace solo cuando cambia data/profiles/).
+  multiplex_profiles: true
+
+# --- YOLO -------------------------------------------------------------------
+# Decisión explícita del dueño: los agentes operan sin aprobación por acción.
+# El env HERMES_YOLO_MODE=1 (compose) congela el bypass a nivel proceso; esto
+# es el respaldo en config. "off" va entre comillas: YAML 1.1 lo parsearía
+# como false.
+approvals:
+  mode: "off"
+  # Los cron jobs SÍ se ejecutan sin frenar (approve), pero el guard de
+  # lifecycle sigue bloqueando `hermes gateway restart` desde un cron.
+  cron_mode: approve
+  timeout: 300
+
+delegation:
+  subagent_auto_approve: true
+
+security:
+  # Los agentes pueden editar su propio SOUL.md / AGENTS.md conversando.
+  # Es lo que habilita "moldeá tu agente hablándole".
+  protected_instruction_files: false
+
+# --- Toolsets ---------------------------------------------------------------
+# `toolsets:` top-level está deprecado; la config viva es platform_toolsets,
+# indexada por plataforma (hermes_cli/platforms.py). Listamos el bundle
+# compuesto + cada toolset configurable de forma explícita: cuando la lista
+# trae claves configurables, Hermes usa membresía directa y lo que no esté
+# listado queda apagado.
+platform_toolsets:
+  cli: &full_toolset
+    - hermes-cli
+    - terminal
+    - file
+    - web
+    - browser
+    - computer_use
+    - code_execution
+    - vision
+    - image_gen
+    - skills
+    - todo
+    - memory
+    - context_engine
+    - session_search
+    - clarify
+    - delegation
+    - cronjob
+  cron: *full_toolset
+  api_server: *full_toolset
+
+# --- Modelo por defecto -----------------------------------------------------
+# Se resuelve desde data/auth.json (active_provider) si no lo fijás acá.
+# Cada perfil puede pisar esto en data/profiles/<name>/config.yaml.
+# Ejemplos:
+#   model: {provider: openai-codex, default: gpt-5.6-sol}
+#   model: {provider: anthropic,    default: claude-opus-5}      # o claude-fable-5 / claude-sonnet-5
+#   model: {provider: openrouter,   default: anthropic/claude-opus-5}
+# model:
+#   provider: openai-codex
+#   default: gpt-5.6-sol

@@ -1,0 +1,21 @@
+name: research-analyst
+description: >-
+  Researches markets, products, competitors, and technical topics using a
+  Firecrawl MCP plus Hermes browser automation backed by agent-browser.
+tenant: example
+
+model:
+  provider: openai-codex
+  default: gpt-5.6-sol
+
+env:
+  - FIRECRAWL_MCP_URL
+  - FIRECRAWL_API_KEY
+
+mcp_servers:
+  firecrawl:
+    url: "${FIRECRAWL_MCP_URL}"
+    headers:
+      Authorization: "Bearer ${FIRECRAWL_API_KEY}"
+
+# agent-browser is installed globally in the image and used by Hermes browser.

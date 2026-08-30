@@ -1,0 +1,22 @@
+.DS_Store
+.git-data/
+*.local
+*.pyc
+__pycache__/
+node_modules/
+
+# Runtime and secret material
+data/
+backups/
+.agentctl.env
+.agentctl.lock
+.profiles-snapshot
+.dash-cookies
+.restic-password.local
+.env
+!.env.example
+!**/profile.env.example
+
+# Restores and smoke-test scratch state
+restore-*/
+hermes-smoke.*/

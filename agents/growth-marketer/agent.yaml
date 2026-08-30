@@ -1,0 +1,22 @@
+name: growth-marketer
+description: >-
+  Plans and reviews growth experiments, prepares channel content, creates
+  assets with image_gen, and connects to an operator-chosen social scheduling
+  MCP over HTTP.
+tenant: example
+
+model:
+  provider: anthropic
+  default: claude-opus-5
+
+env:
+  - SOCIAL_MCP_URL
+  - SOCIAL_MCP_TOKEN
+
+mcp_servers:
+  social-scheduler:
+    url: "${SOCIAL_MCP_URL}"
+    headers:
+      Authorization: "Bearer ${SOCIAL_MCP_TOKEN}"
+
+# image_gen is enabled by the shared platform_toolsets configuration.

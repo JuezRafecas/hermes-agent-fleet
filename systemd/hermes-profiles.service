@@ -1,0 +1,10 @@
+[Unit]
+Description=Restart Hermes gateway when the profile set changes
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+Environment=HERMES_ROOT=/srv/hermes
+ExecStart=/srv/hermes/scripts/profiles-reload.sh
+TimeoutStartSec=180

@@ -1,0 +1,7 @@
+#!/bin/sh
+# neon-mcp <profile> — Neon MCP using that profile's NEON_API_KEY.
+# Hermes does not expand ${VAR} in stdio args/env, so the profile is an argument.
+p="${1:-default}"; f="/opt/data/profiles/$p/.env"; [ "$p" = default ] && f=/opt/data/.env
+k=$(grep -m1 '^NEON_API_KEY=' "$f" 2>/dev/null | cut -d= -f2-)
+[ -n "$k" ] || { echo "neon-mcp: NEON_API_KEY is missing from $f" >&2; exit 1; }
+exec mcp-server-neon start "$k"

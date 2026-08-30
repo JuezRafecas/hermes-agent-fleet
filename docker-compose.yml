@@ -1,0 +1,47 @@
+# hermes-agent-fleet — ONE Hermes container, N profiles multiplexed by the
+# gateway. `command: ["gateway","run"]` redirects into the s6-supervised
+# gateway service, which also starts the dashboard when HERMES_DASHBOARD=1.
+#
+# HERMES_UID / HERMES_GID come from the environment (agentctl exports them
+# from data/.env); they must match the owner of ./data on the host.
+services:
+  hermes:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: hermes-agent-fleet:v2026.8.27
+    container_name: ${HERMES_CONTAINER:-hermes}
+    restart: unless-stopped
+    command: ["gateway", "run"]
+    volumes:
+      - ./data:/opt/data
+    env_file:
+      - ./data/.env
+    environment:
+      HERMES_HOME: /opt/data
+      HERMES_UID: ${HERMES_UID:-10001}
+      HERMES_GID: ${HERMES_GID:-10001}
+      HERMES_DASHBOARD: "1"
+      # Container-internal bind. Only 127.0.0.1 is published on the host, and
+      # the non-loopback in-container bind is what engages the auth gate.
+      HERMES_DASHBOARD_HOST: 0.0.0.0
+      HERMES_DASHBOARD_PORT: "9119"
+      HERMES_YOLO_MODE: "1"
+      # gh persiste su login en archivo (el terminal de los agentes no ve GH_TOKEN)
+      GH_CONFIG_DIR: /opt/data/.config/gh
+      # Hermes itself checks process-global DISPLAY on Linux. The wrapper
+      # replaces this fallback with the active profile's assignment for the
+      # actual cua-driver child, and BASH_ENV does the same for terminal shells.
+      DISPLAY: ":100"
+    ports:
+      - "127.0.0.1:${HERMES_PORT:-9119}:9119"
+    shm_size: 1g
+    cpus: 6
+    mem_limit: 16g
+    pids_limit: 4096
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9119/api/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
