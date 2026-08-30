@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>I built a fleet of AI employees that works 24/7</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..700;1,9..144,300..700&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0e0d14;--fg:#ece8f3;--muted:#a9a2bd;--line:rgba(255,255,255,.1);--amber:#ffb347;--violet:#b9a6ff}
+html,body{margin:0;background:var(--bg);color:var(--fg);font-family:"Source Serif 4",Georgia,serif;font-size:19px;line-height:1.65;-webkit-font-smoothing:antialiased}
+article{max-width:720px;margin:0 auto;padding:48px 22px 96px}
+.kicker{font-family:"DM Mono",monospace;font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--amber)}
+h1{font-family:"Fraunces",serif;font-weight:400;font-size:clamp(38px,6vw,58px);line-height:1.05;letter-spacing:-.02em;margin:14px 0 14px}
+.lede{font-size:22px;color:var(--muted);margin:0 0 28px;font-style:italic}
+figure{margin:0 0 36px}
+figure img{width:100%;height:auto;border-radius:14px;border:1px solid var(--line);display:block}
+figcaption{font-family:"DM Mono",monospace;font-size:12px;color:var(--muted);margin-top:10px;letter-spacing:.04em}
+h2{font-family:"Fraunces",serif;font-weight:500;font-size:30px;letter-spacing:-.01em;margin:46px 0 12px}
+h3{font-family:"Fraunces",serif;font-weight:500;font-size:22px;margin:30px 0 8px}
+p{margin:0 0 18px}
+ul,ol{padding-left:24px;margin:0 0 18px}
+li{margin-bottom:6px}
+strong{color:#fff}
+code{font-family:"DM Mono",monospace;font-size:15px;color:var(--violet);background:rgba(185,166,255,.1);padding:1px 6px;border-radius:5px}
+blockquote{margin:24px 0;padding:14px 20px;border-left:3px solid var(--amber);background:rgba(255,179,71,.06);color:var(--fg);font-style:italic}
+table{width:100%;border-collapse:collapse;font-size:16px;margin:8px 0 22px}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-family:"DM Mono",monospace;font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+hr{border:0;border-top:1px solid var(--line);margin:40px 0}
+.meta{font-family:"DM Mono",monospace;font-size:12px;color:var(--muted);letter-spacing:.06em;margin-top:40px}
+</style>
+</head>
+<body>
+<article>
+<div class="kicker">Build log · August 2026</div>
+<h1>I built a fleet of AI employees that works 24/7</h1>
+<p class="lede">One inexpensive VPS, one native Hermes Agent runtime, and a roster of persistent employees with their own personalities, models, tools, schedules, browsers, desktops, and memory.</p>
+
+<figure>
+  <img src="./fleet-v2.png" alt="An isometric server running a Hermes agent fleet, with multiple AI employees connected to browsers, terminals, databases, messaging, schedules, creative tools, and a laptop over a private tunnel.">
+  <figcaption>The fleet: one runtime, many employees, each with a brain and a set of hands.</figcaption>
+</figure>
+
+<h2>It started with a bot</h2>
+<p>I recently saw the new Grok “bot” interface and immediately liked the mental model. You create an assistant, talk to it, shape its personality in conversation, and give it the tools it needs. It feels less like configuring software and more like onboarding a colleague. The important design choice is that the bot becomes something persistent: it has a recognizable identity that can improve as you work with it.</p>
+<p>That interface sparked a larger question for me as a founder and CTO: <strong>what if I had a whole roster of those?</strong> Not chat presets that disappear when I close a tab, but real 24/7 employees. Each one would have a job, memory, a model suited to that job, and its own hands: browser automation, computer use, command-line tools, databases, MCP servers, and cron. I wanted them running on my own cheap VPS, reachable from my laptop or phone, and able to share the Claude and Codex subscriptions I already pay for.</p>
+<p>I also wanted the boring operational detail that usually kills the idea: adding an employee from a UI should not require rebuilding an image or redeploying a service. Create a profile, describe the role, attach tools, and let it appear in the roster.</p>
+
+<h2>The first version was impressively wrong</h2>
+<p>My first attempt treated the problem like a public multi-tenant cloud. It had custom reconciliation, release machinery, per-agent sidecars, network policy, receipts, and a patched runtime. Every upstream change became a migration. The platform code was becoming the product while the employees still were not doing useful work.</p>
+<p>Then I looked again at native Hermes Agent. It already had the concepts I was recreating: multiplexed profiles, persistent sessions and memory, per-profile configuration, MCPs, routines, group chats, a dashboard, provider authentication, browser tools, computer use, and a desktop client. The lean rebuild began with one rule: <strong>no fork</strong>. Use the official image, add only OS-level tools and wrappers, and let Hermes remain Hermes.</p>
+<blockquote>The best architecture change was deleting the architecture I no longer needed.</blockquote>
+<p>The result is plain: one derived image, one Compose service, a small administration script, a few systemd units, and profile directories. Upgrading is a pinned image change plus verification, not a rebase of private runtime patches.</p>
+
+<h2>What the fleet looks like</h2>
+<h3>Profiles are employees</h3>
+<p>A Hermes profile is the right unit of identity. Each employee gets a <code>SOUL.md</code> describing who it is, what it owns, how it should reason, which actions are forbidden, and when it needs human authority. It also gets private configuration, environment variables, skills, routines, memory, sessions, a home directory, and a workspace. Root authentication can cascade to the fleet, while a sensitive provider credential can remain inside one profile.</p>
+
+<h3>Each role chooses its brain</h3>
+<p>Model selection is per employee. I can use Claude for editorial judgment, Codex for tool-heavy execution, or OpenRouter for cheaper delegated work. A shared login avoids repeating authentication, while model choice and profile context stay separate.</p>
+
+<h3>Skills are shared; responsibility is not</h3>
+<p>Reusable skills synchronize from a shared source directory. A research method, design checklist, or reporting template should not be copied by hand. Credentials and authority are different: a group chat or shared skill does not grant another employee’s account, memory, or permission.</p>
+
+<h3>MCPs connect the work</h3>
+<p>HTTP MCPs are simple: headers can reference profile environment variables, so the YAML contains a placeholder instead of a secret. Stdio MCPs exposed a less obvious gotcha. Environment placeholders in stdio arguments are not reliably resolved with the active profile’s private environment. The lean answer is a profile-aware wrapper: it receives a non-secret profile name, reads the correct private <code>.env</code>, exports the provider variable, and executes the MCP. It is a few lines of shell, and it keeps credentials out of config and process arguments.</p>
+
+<h2>Hands, schedules, and YOLO</h2>
+<p>The derived image adds the tools I expect an operational employee to use: <code>psql</code>, <code>mongosh</code>, <code>gh</code>, <code>jq</code>, <code>rg</code>, Git, Node tooling, and browser automation. Hermes supplies the terminal, files, browser, computer use, image generation, memory, delegation, and cron toolsets. Deterministic work belongs in scripts and queries; the model interprets bounded output, handles ambiguity, and decides what to escalate.</p>
+<p>The fleet runs in YOLO mode because unattended routines cannot wait for a modal confirmation at 3 a.m. That choice deserves blunt language. YOLO removes ordinary approval prompts; it does not make untrusted code safe, turn a shared container into an isolation boundary, or grant business authority. A scheduled job capable of sending, spending, publishing, deleting, or changing external state is durable power. I constrain that power with narrow credentials, explicit SOUL rules, provider-side limits, idempotency, reconciliation, and precise routine instructions.</p>
+<p>Cron is native and profile-specific. One employee can run a morning data check while another prepares a weekly creative review. Closing the desktop does nothing to them; the gateway and scheduler stay on the VPS.</p>
+
+<h2>The gotchas that mattered</h2>
+<ul>
+  <li><strong>The gateway resolves the profile set at startup.</strong> Creating a directory is not enough. A host-side watcher reloads the gateway when the set changes.</li>
+  <li><strong>Stable desktop sessions need a stable dashboard secret.</strong> A password alone is not enough; changing the session-signing value logs clients out after a restart.</li>
+  <li><strong>Agent terminals use scrubbed environments.</strong> A root GitHub token does not magically appear in every profile home. I authenticate <code>gh</code> to a file and synchronize that file with restrictive permissions.</li>
+  <li><strong>Transport health is not provider health.</strong> An MCP process starting successfully does not prove its credential works. Every integration needs a harmless authenticated read.</li>
+  <li><strong>Shell probes can lie.</strong> Under <code>pipefail</code>, piping <code>Xvfb -help</code> into <code>head</code> can report failure because the reader closes early and Xvfb receives SIGPIPE.</li>
+</ul>
+
+<h2>A file drop for human handoffs</h2>
+<p>Employees frequently produce something a human should open: an HTML report, a visual review, a PDF, a CSV, or a small prototype. Leaving it inside a VPS workspace is not a handoff, and pasting a wall of HTML into chat is miserable. I added a generic shared file drop backed by any S3-compatible provider. The upload command returns a public URL namespaced by profile and date.</p>
+<p>The bucket deletes the shared prefix after 30 days. The uploader adds a retention tag and HTTP expiry, but provider lifecycle performs deletion. Private exports, personal data, and secrets never belong there. Encrypted backups use a separate private bucket.</p>
+
+<h2>One virtual desktop per employee</h2>
+<p>Browser automation handles most web work headlessly, but some tasks genuinely need a desktop. A supervised Xvfb pool provides ten displays, from <code>:100</code> to <code>:109</code>. The default profile owns the first; each new employee receives the lowest free display. A wrapper resolves the active profile before launching the computer-use driver, so concurrent employees do not see or move each other’s windows.</p>
+<p>This is operational separation, not a security sandbox. They still share one container and Unix user. For my trusted internal roster, that is an honest and useful tradeoff: far less memory and machinery than a browser sidecar per employee, while screenshots and GUI sessions remain predictable.</p>
+
+<h2>Encrypted, off-site, and tested</h2>
+<p>All valuable state lives under one persistent data root: identities, configuration, sessions, memories, routines, browser state, and workspaces. A daily timer creates a local archive and then runs Restic against an arbitrary S3-compatible private bucket. Restic encrypts before upload and applies daily and weekly retention.</p>
+<p>A green backup is not recovery evidence. Restores require a new absolute destination, so they cannot overwrite the active fleet. I inspect drills separately and keep the Restic password outside the VPS.</p>
+
+<h2>A parallel remote-coding lane</h2>
+<p>The same VPS also hosts a separate lane for full repository work with Orca headless. Hermes employees and coding worktrees have different trust and state models, so Orca runs as its own Unix user with its own Codex login, GitHub authentication, projects, and toolchains. Approved repositories live under <code>/srv/orca/projects</code>; task work happens in disposable worktrees rather than inside an employee’s persistent home.</p>
+<p>I run <code>orca serve</code> over a private network and pair it with the desktop. The Orca user installs fnm, pnpm, bun, and Go locally. I can start or follow work from my phone without keeping a laptop awake while the employees continue their routines.</p>
+<p>Sharing a VPS does not mean sharing identity. Hermes does not mount Orca projects or auth, and Orca does not read Hermes state. That boundary is simple enough to explain and simple enough to audit.</p>
+
+<h2>Example deployments</h2>
+<h3>Catalog curator for an e-commerce store</h3>
+<p>A curator reads the product catalog and order history, detects missing relationships, proposes cross-sell or bundle candidates, and generates a review page. Deterministic scripts gather evidence; the model handles product judgment. Publishing stays behind an explicit approval step, and the shared file drop gives the merchant a temporary visual handoff.</p>
+
+<h3>Lifecycle-email operator</h3>
+<p>A lifecycle employee audits domains, segments, templates, and recent delivery, then drafts onboarding, activation, or retention improvements. A daily routine can flag anomalies without sending anything. When sending is authorized, the instruction names the audience, template, schedule, limits, and reconciliation required after the provider action.</p>
+
+<h3>Paid-ads analyst</h3>
+<p>An ads analyst collects account structure and performance, separates commercial results from tracking health, and produces a source-linked report. It can prepare budget or creative proposals, but connection to an ads API is not permission to spend. Mutations require exact account scope, a maximum change, rollback conditions, and live provider verification.</p>
+
+<h3>WhatsApp support triage</h3>
+<p>A support employee classifies inbound conversations, retrieves approved context, drafts replies, and escalates sensitive cases. It can run continuously from the phone-facing channel while preserving conversation history in its profile. The safest early deployment is triage and drafting; automatic outbound replies come only after identity, consent, templates, and failure handling are proven.</p>
+
+<h3>Data Ops on Postgres and MongoDB</h3>
+<p>A data-ops employee uses profile-aware wrappers for database MCPs plus direct CLIs for repeatable queries. It defaults to read-only credentials, bounds rows and time windows, records freshness and denominators, and hands off a reproducible report. Schema changes and writes remain separate, explicitly authorized operations with recovery plans.</p>
+
+<h2>What is next</h2>
+<p>The next work is less about adding more infrastructure and more about improving how these employees earn trust: better routine receipts, clearer authority boundaries, restore drills, provider-specific read-only checks, and a small library of excellent generic role seeds. I also want smoother phone workflows and more deliberate collaboration between persistent employees and temporary coding worktrees.</p>
+<p>The important part already feels right: I can create an employee, shape it by talking to it, choose its brain, give it the right hands, and let it keep working after I close the laptop. The implementation is deliberately ordinary enough that one technical founder can understand and maintain it.</p>
+<p>The generic source is available at <a href="https://github.com/&#74;uez&#82;afecas/hermes-agent-fleet">github.com/&#74;uez&#82;afecas/hermes-agent-fleet</a>.</p>
+
+<div class="meta">hermes-agent · docker · tailscale · claude · codex · openrouter · orca</div>
+</article>
+</body>
+</html>
